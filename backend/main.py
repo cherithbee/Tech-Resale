@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
@@ -17,8 +18,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CLOUD-READY DATABASE CONNECTION ---
-# This tells the app: "If we are on Render, use the cloud URL. If we are on your computer, use localhost."
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", 
     "postgresql://admin:password123@localhost:5432/resale_predictor"
@@ -26,7 +25,13 @@ DATABASE_URL = os.environ.get(
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-# ---------------------------------------
+
+# Define the structure for the data coming from the frontend form
+class DeviceCreate(BaseModel):
+    brand: str
+    model: str
+    original_msrp: float
+    release_date: str
 
 @app.on_event("startup")
 def startup_db_client():
@@ -36,11 +41,9 @@ def startup_db_client():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Fresh reset: Drop old tables to clear out old setups
         cursor.execute("DROP TABLE IF EXISTS historical_prices CASCADE;")
         cursor.execute("DROP TABLE IF EXISTS devices CASCADE;")
         
-        # Recreate tables cleanly
         cursor.execute("""
             CREATE TABLE devices (
                 device_id SERIAL PRIMARY KEY,
@@ -59,9 +62,6 @@ def startup_db_client():
             );
         """)
         
-        print("Populating database with 10 devices and historical data...")
-        
-        # Insert 10 distinct devices
         devices_data = [
             ('Samsung', 'Galaxy Tab S8 Ultra', 40000, '2022-02-09'),
             ('DJI', 'Osmo Action 4', 14500, '2023-08-02'),
@@ -82,7 +82,6 @@ def startup_db_client():
             )
             dev_id = cursor.fetchone()['device_id']
             
-            # Generate 10 downward trending historical price data points per device
             msrp = dev[2]
             prices = [
                 int(msrp * 0.85), int(msrp * 0.80), int(msrp * 0.76), int(msrp * 0.72), int(msrp * 0.68),
@@ -100,7 +99,6 @@ def startup_db_client():
                 )
                 
         conn.commit()
-        print("Database successfully loaded with 10 devices!")
     except Exception as e:
         print(f"Startup DB Error: {e}")
     finally:
@@ -182,6 +180,45 @@ def predict_price(device_id: int):
             
         return {"predictions": predictions}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+# --- NEW: POST ROUTE FOR MANUAL DATA ENTRY ---
+@app.post("/api/devices")
+def add_device(device: DeviceCreate):
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Insert the new device
+        cursor.execute(
+            "INSERT INTO devices (brand, model, original_msrp, release_date) VALUES (%s, %s, %s, %s) RETURNING device_id;",
+            (device.brand, device.model, device.original_msrp, device.release_date)
+        )
+        new_id = cursor.fetchone()['device_id']
+        
+        # Automatically generate a baseline history so the ML model has data to work with
+        prices = [
+            int(device.original_msrp * 0.90), int(device.original_msrp * 0.82), 
+            int(device.original_msrp * 0.75), int(device.original_msrp * 0.68), 
+            int(device.original_msrp * 0.60)
+        ]
+        dates = ['2025-02-15', '2025-05-15', '2025-08-15', '2025-11-15', '2026-02-15']
+        
+        for d, p in zip(dates, prices):
+            cursor.execute(
+                "INSERT INTO historical_prices (device_id, date_recorded, resale_price, condition, data_source) VALUES (%s, %s, %s, 'Good', 'Simulated');",
+                (new_id, d, p)
+            )
+            
+        conn.commit()
+        return {"status": "success", "message": f"Added {device.brand} {device.model}."}
+    except Exception as e:
+        if conn: conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if cursor: cursor.close()
