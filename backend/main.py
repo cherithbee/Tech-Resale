@@ -21,7 +21,6 @@ app.add_middleware(
 )
 
 # --- DATABASE CONNECTION ---
-# Automatically switches between Render Cloud DB and Local Docker DB
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", 
     "postgresql://admin:password123@localhost:5432/resale_predictor"
@@ -175,7 +174,7 @@ def predict_price(device_id: int):
         X = df[['days_passed']]
         y = df['resale_price']
         
-        # POLYNOMIAL REGRESSION: Creates a curve instead of a straight line
+        # POLYNOMIAL REGRESSION
         poly = PolynomialFeatures(degree=2)
         X_poly = poly.fit_transform(X)
         
@@ -185,7 +184,6 @@ def predict_price(device_id: int):
         last_date = df['date_recorded'].max()
         last_days_passed = df['days_passed'].max()
         
-        # Generate predictions up to 180 days out for a smooth chart curve
         future_intervals = [30, 60, 90, 120, 150, 180]
         predictions = []
         
@@ -215,22 +213,17 @@ def add_device(device: DeviceCreate):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Insert the new device into the database
         cursor.execute(
             "INSERT INTO devices (brand, model, original_msrp, release_date) VALUES (%s, %s, %s, %s) RETURNING device_id;",
             (device.brand, device.model, device.original_msrp, device.release_date)
         )
         new_id = cursor.fetchone()['device_id']
         
-        # 2. Automatically generate a baseline simulated history line
-        # This ensures the Machine Learning model doesn't crash from having 0 records.
         prices = [
             int(device.original_msrp * 0.90), int(device.original_msrp * 0.82), 
             int(device.original_msrp * 0.75), int(device.original_msrp * 0.68), 
             int(device.original_msrp * 0.60)
         ]
-        
-        # Generating dates starting from a bit in the past up to present
         dates = ['2025-02-15', '2025-05-15', '2025-08-15', '2025-11-15', '2026-02-15']
         
         for d, p in zip(dates, prices):
@@ -241,6 +234,29 @@ def add_device(device: DeviceCreate):
             
         conn.commit()
         return {"status": "success", "message": f"Added {device.brand} {device.model} with simulated pricing history."}
+    except Exception as e:
+        if conn: conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.delete("/api/devices/{device_id}")
+def delete_device(device_id: int):
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Delete associated historical prices first
+        cursor.execute("DELETE FROM historical_prices WHERE device_id = %s;", (device_id,))
+        
+        # 2. Delete the device itself
+        cursor.execute("DELETE FROM devices WHERE device_id = %s;", (device_id,))
+        
+        conn.commit()
+        return {"status": "success", "message": f"Device {device_id} and its history have been deleted."}
     except Exception as e:
         if conn: conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))

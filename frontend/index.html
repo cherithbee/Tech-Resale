@@ -51,9 +51,13 @@
                         <option value="">Loading devices...</option>
                     </select>
                 </div>
-                <div id="deviceMeta" class="mt-4 pt-4 border-t border-gray-700 text-sm text-gray-400 hidden">
+                <div id="deviceMeta" class="mt-4 pt-4 border-t border-gray-700 text-sm text-gray-400 hidden flex flex-col gap-2">
                     <p>Original MSRP: <span id="msrpValue" class="text-white font-bold"></span></p>
                     <p>Release Date: <span id="releaseDateValue" class="text-white font-bold"></span></p>
+                    
+                    <button id="deleteDeviceBtn" class="mt-2 w-full bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 font-semibold py-2 rounded-xl text-xs transition duration-200">
+                        Delete This Device
+                    </button>
                 </div>
             </div>
 
@@ -81,20 +85,19 @@
     </div>
 
     <script>
-        // REPLACE THIS WITH YOUR RENDER URL (Keep the /api at the end)
+        // CHANGE THIS TO YOUR ACTUAL RENDER API URL
         const API_URL = 'https://tech-resale-api.onrender.com/api'; 
         let resaleChartInstance = null;
 
         document.addEventListener('DOMContentLoaded', () => {
             fetchDevices();
             
-            // Listen for dropdown changes
             document.getElementById('deviceSelect').addEventListener('change', (e) => {
                 if (e.target.value) loadDeviceDashboard(e.target.value);
             });
             
-            // Listen for form submission
             document.getElementById('addDeviceForm').addEventListener('submit', handleFormSubmit);
+            document.getElementById('deleteDeviceBtn').addEventListener('click', handleDeleteDevice);
         });
 
         async function fetchDevices() {
@@ -146,13 +149,48 @@
                 if (response.ok) {
                     alert('Device added successfully!');
                     document.getElementById('addDeviceForm').reset();
-                    await fetchDevices(); // Refresh dropdown
+                    await fetchDevices(); 
                 } else {
                     const errData = await response.json();
                     alert(`Error: ${errData.detail || 'Failed to save device'}`);
                 }
             } catch (err) {
                 console.error("Submission error:", err);
+                alert('Network connection error.');
+            }
+        }
+
+        async function handleDeleteDevice() {
+            const deviceId = document.getElementById('deviceSelect').value;
+            if (!deviceId) return;
+
+            if (!confirm("Are you completely sure you want to permanently delete this device and all its history data?")) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/devices/${deviceId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    alert('Device successfully deleted!');
+                    
+                    document.getElementById('deviceMeta').classList.add('hidden');
+                    document.getElementById('pred30').innerText = '--';
+                    document.getElementById('date30').innerText = 'Target date: --';
+                    document.getElementById('pred90').innerText = '--';
+                    document.getElementById('date90').innerText = 'Target date: --';
+                    
+                    if (resaleChartInstance) resaleChartInstance.destroy();
+                    
+                    await fetchDevices();
+                } else {
+                    const errData = await response.json();
+                    alert(`Error: ${errData.detail || 'Failed to delete device'}`);
+                }
+            } catch (err) {
+                console.error("Deletion error:", err);
                 alert('Network connection error.');
             }
         }
@@ -205,7 +243,7 @@
                             borderDash: [6, 6],
                             pointRadius: 4,
                             fill: false,
-                            tension: 0.4
+                            tension: 0.4 
                         }
                     ]
                 },
