@@ -6,10 +6,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
 from datetime import timedelta
 
 app = FastAPI(title="Tech Resale Predictor API")
 
+# --- CORS SETUP ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -18,6 +20,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- DATABASE CONNECTION ---
+# Automatically switches between Render Cloud DB and Local Docker DB
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", 
     "postgresql://admin:password123@localhost:5432/resale_predictor"
@@ -26,13 +30,14 @@ DATABASE_URL = os.environ.get(
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-# Define the structure for the data coming from the frontend form
+# --- DATA MODELS ---
 class DeviceCreate(BaseModel):
     brand: str
     model: str
     original_msrp: float
     release_date: str
 
+# --- AUTO-SETUP DATABASE ---
 @app.on_event("startup")
 def startup_db_client():
     conn = None
@@ -105,9 +110,11 @@ def startup_db_client():
         if cursor: cursor.close()
         if conn: conn.close()
 
+# --- API ROUTES ---
+
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "API is running"}
+    return {"status": "online", "message": "Tech Resale Predictor API is running"}
 
 @app.get("/api/devices")
 def get_devices():
@@ -134,6 +141,10 @@ def get_device_history(device_id: int):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM devices WHERE device_id = %s;", (device_id,))
         device = cursor.fetchone()
+        
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+            
         cursor.execute("SELECT record_id, date_recorded, condition, resale_price, data_source FROM historical_prices WHERE device_id = %s ORDER BY date_recorded ASC;", (device_id,))
         history = cursor.fetchall()
         return {"device": device, "price_history": history}
@@ -163,15 +174,26 @@ def predict_price(device_id: int):
         
         X = df[['days_passed']]
         y = df['resale_price']
-        model = LinearRegression().fit(X, y)
+        
+        # POLYNOMIAL REGRESSION: Creates a curve instead of a straight line
+        poly = PolynomialFeatures(degree=2)
+        X_poly = poly.fit_transform(X)
+        
+        model = LinearRegression()
+        model.fit(X_poly, y)
         
         last_date = df['date_recorded'].max()
         last_days_passed = df['days_passed'].max()
         
+        # Generate predictions up to 180 days out for a smooth chart curve
+        future_intervals = [30, 60, 90, 120, 150, 180]
         predictions = []
-        for days in [30, 90]:
+        
+        for days in future_intervals:
             future_X = pd.DataFrame({'days_passed': [last_days_passed + days]})
-            predicted_price = model.predict(future_X)[0]
+            future_X_poly = poly.transform(future_X)
+            predicted_price = model.predict(future_X_poly)[0]
+            
             predictions.append({
                 "days_out": days,
                 "target_date": (last_date + timedelta(days=days)).strftime("%Y-%m-%d"),
@@ -185,7 +207,6 @@ def predict_price(device_id: int):
         if cursor: cursor.close()
         if conn: conn.close()
 
-# --- NEW: POST ROUTE FOR MANUAL DATA ENTRY ---
 @app.post("/api/devices")
 def add_device(device: DeviceCreate):
     conn = None
@@ -194,19 +215,22 @@ def add_device(device: DeviceCreate):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Insert the new device
+        # 1. Insert the new device into the database
         cursor.execute(
             "INSERT INTO devices (brand, model, original_msrp, release_date) VALUES (%s, %s, %s, %s) RETURNING device_id;",
             (device.brand, device.model, device.original_msrp, device.release_date)
         )
         new_id = cursor.fetchone()['device_id']
         
-        # Automatically generate a baseline history so the ML model has data to work with
+        # 2. Automatically generate a baseline simulated history line
+        # This ensures the Machine Learning model doesn't crash from having 0 records.
         prices = [
             int(device.original_msrp * 0.90), int(device.original_msrp * 0.82), 
             int(device.original_msrp * 0.75), int(device.original_msrp * 0.68), 
             int(device.original_msrp * 0.60)
         ]
+        
+        # Generating dates starting from a bit in the past up to present
         dates = ['2025-02-15', '2025-05-15', '2025-08-15', '2025-11-15', '2026-02-15']
         
         for d, p in zip(dates, prices):
@@ -216,7 +240,7 @@ def add_device(device: DeviceCreate):
             )
             
         conn.commit()
-        return {"status": "success", "message": f"Added {device.brand} {device.model}."}
+        return {"status": "success", "message": f"Added {device.brand} {device.model} with simulated pricing history."}
     except Exception as e:
         if conn: conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
