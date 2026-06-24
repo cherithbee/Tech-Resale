@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tech Resale Predictor Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen font-sans p-8">
+
+    <div class="max-w-5xl mx-auto">
+        <header class="mb-10 text-center md:text-left">
+            <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
+                Tech Resale Predictor
+            </h1>
+            <p class="text-gray-400 mt-2">Analyze depreciation curves and forecast future asset value using Machine Learning.</p>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-gray-800 p-6 rounded-2xl border border-gray-700 shadow-xl flex flex-col justify-between">
+                <div>
+                    <label for="deviceSelect" class="block text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">Select Device</label>
+                    <select id="deviceSelect" class="w-full bg-gray-700 text-white border border-gray-600 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500">
+                        <option value="">Loading devices...</option>
+                    </select>
+                </div>
+                <div id="deviceMeta" class="mt-4 pt-4 border-t border-gray-700 text-sm text-gray-400 hidden">
+                    <p>Original MSRP: <span id="msrpValue" class="text-white font-bold"></span></p>
+                    <p>Release Date: <span id="releaseDateValue" class="text-white font-bold"></span></p>
+                </div>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-2xl border border-gray-700 shadow-xl">
+                <span class="text-sm font-semibold text-gray-400 uppercase tracking-wider block mb-1">30-Day Forecast</span>
+                <div id="pred30" class="text-3xl font-bold text-blue-400 mt-2">--</div>
+                <p class="text-xs text-gray-500 mt-2" id="date30">Target date: --</p>
+            </div>
+
+            <div class="bg-gray-800 p-6 rounded-2xl border border-gray-700 shadow-xl">
+                <span class="text-sm font-semibold text-gray-400 uppercase tracking-wider block mb-1">90-Day Forecast</span>
+                <div id="pred90" class="text-3xl font-bold text-emerald-400 mt-2">--</div>
+                <p class="text-xs text-gray-500 mt-2" id="date90">Target date: --</p>
+            </div>
+        </div>
+
+        <div class="bg-gray-800 p-6 rounded-2xl border border-gray-700 shadow-xl">
+            <h3 class="text-lg font-bold mb-4 flex items-center gap-2">
+                <span class="w-3 h-3 rounded-full bg-blue-500"></span> Value Depreciation Timeline
+            </h3>
+            <div class="relative h-[400px] w-full">
+                <canvas id="resaleChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://127.0.0.1:8000/api';
+        let resaleChartInstance = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchDevices();
+            document.getElementById('deviceSelect').addEventListener('change', (e) => {
+                if (e.target.value) loadDeviceDashboard(e.target.value);
+            });
+        });
+
+        async function fetchDevices() {
+            try {
+                const response = await fetch(`${API_URL}/devices`);
+                const devices = await response.json();
+                const select = document.getElementById('deviceSelect');
+                
+                select.innerHTML = '<option value="" disabled selected>-- Select a Tracked Product --</option>';
+                devices.forEach(dev => {
+                    select.innerHTML += `<option value="${dev.device_id}">${dev.brand} ${dev.model}</option>`;
+                });
+            } catch (err) {
+                console.error("Connection Error:", err);
+                document.getElementById('deviceSelect').innerHTML = '<option value="">Error connecting to API</option>';
+            }
+        }
+
+        async function loadDeviceDashboard(deviceId) {
+            try {
+                const [historyRes, predictRes] = await Promise.all([
+                    fetch(`${API_URL}/history/${deviceId}`).then(res => res.json()),
+                    fetch(`${API_URL}/predict/${deviceId}`).then(res => res.json())
+                ]);
+                updateMetricsUI(historyRes.device, predictRes.predictions);
+                renderDepreciationChart(historyRes.price_history, predictRes.predictions);
+            } catch (err) {
+                console.error("Dashboard Load Error:", err);
+            }
+        }
+
+        function updateMetricsUI(device, predictions) {
+            document.getElementById('deviceMeta').classList.remove('hidden');
+            document.getElementById('msrpValue').innerText = `฿${parseFloat(device.original_msrp).toLocaleString()}`;
+            document.getElementById('releaseDateValue').innerText = device.release_date;
+
+            const p30 = predictions.find(p => p.days_out === 30);
+            const p90 = predictions.find(p => p.days_out === 90);
+
+            if (p30) {
+                document.getElementById('pred30').innerText = `฿${parseFloat(p30.estimated_value).toLocaleString()}`;
+                document.getElementById('date30').innerText = `Target date: ${p30.target_date}`;
+            }
+            if (p90) {
+                document.getElementById('pred90').innerText = `฿${parseFloat(p90.estimated_value).toLocaleString()}`;
+                document.getElementById('date90').innerText = `Target date: ${p90.target_date}`;
+            }
+        }
+
+        function renderDepreciationChart(history, predictions) {
+            const ctx = document.getElementById('resaleChart').getContext('2d');
+            const historicalPoints = history.map(h => ({ x: h.date_recorded, y: parseFloat(h.resale_price) }));
+            const lastHistoricalPoint = historicalPoints[historicalPoints.length - 1];
+            
+            const predictionPoints = predictions && predictions.length > 0 
+                ? [{ x: lastHistoricalPoint.x, y: lastHistoricalPoint.y }, ...predictions.map(p => ({ x: p.target_date, y: p.estimated_value }))]
+                : [];
+
+            if (resaleChartInstance) resaleChartInstance.destroy();
+
+            resaleChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: 'Historical Sales (THB)',
+                            data: historicalPoints,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            pointRadius: 4,
+                            showLine: false
+                        },
+                        {
+                            label: 'ML Forecast Line',
+                            data: predictionPoints,
+                            borderColor: '#10b981',
+                            borderDash: [6, 6],
+                            pointRadius: 6,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { type: 'time', time: { unit: 'month' }, grid: { color: '#374151' }, ticks: { color: '#9ca3af' } },
+                        y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' } }
+                    },
+                    plugins: { legend: { labels: { color: '#f3f4f6' } } }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
